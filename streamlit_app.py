@@ -69,13 +69,16 @@ with st.sidebar:
     with st.expander("🛡️ หมวด Constraint"):
         ffa_limit = st.number_input("FFA mix feed (%)", value=10.0)
         max_pre_cap_val = st.number_input("max cap pretreatment (MT/day)", value=0.91*600)
-        cpo_b_pct = st.slider("%CPO B", 0.0, 40.0, 40.0) / 100
-        pfad_ex_pct = st.slider("%PFAD Extra", 0.0, 2.0, 2.0) / 100
+        cpo_b_pct = st.slider("%CPO B", 0.0, 50.0, 40.0) / 100
+        pfad_ex_pct = st.slider("%PFAD Extra", 0.0, 3.0, 2.0) / 100
+        
+        # --- NEW CONSTRAINT ---
+        pfad_pct_max = st.slider("Max %PFAD limit", 0.0, 30.0, 15.0) / 100
+        
         max_me_cap_val = st.number_input("max cap ME (MT/day)", value=600.0)
-        ps_pct_max = st.slider("Max %PS limit", 10.0, 30.0, 30.0) / 100
+        ps_pct_max = st.slider("Max %PS limit", 10.0, 40.0, 30.0) / 100
         ps_supply_weekly = st.number_input("PS Supply (MT/week)", value=1500.0)
         
-    # --- NEW: หมวด Consumption ---
     with st.expander("🧪 หมวด Consumption (kg/kg feed)"):
         st.subheader("Pretreatment Unit")
         cons_rgl_chem = st.number_input("RGL Consumption", value=0.0259, format="%.4f")
@@ -103,13 +106,19 @@ me_production = max_me_cap_val
 me_total_feed = me_production / c_me
 
 # --------------------------------------------------------------------------------
-# --- DECISION LOGIC: PS vs RPO ---
+# --- DECISION LOGIC: PS vs RPO with PFAD Limit ---
 # --------------------------------------------------------------------------------
 rem_ratio = 1.0 - cpo_b_pct - pfad_ex_pct
 target_ffa = ffa_limit
 rhs = (target_ffa * (1.0 - pfad_ex_pct)) - (10.0 * cpo_b_pct)
 pfad_ratio = (rhs - (5.0 * rem_ratio)) / (80.0 - 5.0)
-if pfad_ratio < 0: pfad_ratio = 0
+
+# Apply Constraints for PFAD
+if pfad_ratio < 0: 
+    pfad_ratio = 0
+if pfad_ratio > pfad_pct_max:
+    pfad_ratio = pfad_pct_max
+
 cpo_a_ratio = rem_ratio - pfad_ratio
 
 mock_rpo_demand = max_pre_cap_val
@@ -121,7 +130,6 @@ mock_pfad_ex = mock_pre_feed * pfad_ex_pct
 
 mock_fs_cost = (mock_cpo_a*cpo_a_p + mock_cpo_b*cpo_b_p + mock_pfad*pfad_p + mock_pfad_ex*pfad_p) * 1000
 
-# Using dynamic consumption variables for Mock Pretreatment
 mock_chem_cost = (mock_pre_feed * cons_rgl_chem * rgl_chem_p * 1000) + \
                  ((cons_h3po4_a*mock_cpo_a + cons_h3po4_b*mock_cpo_b + cons_h3po4_a*mock_pfad) * h3po4_p * 1000) + \
                  ((cons_clay_a*mock_cpo_a + cons_clay_b*mock_cpo_b + cons_clay_a*mock_pfad) * clay_p * 1000)
@@ -136,7 +144,6 @@ mock_rpo_cost_kg = (mock_fs_cost + mock_chem_cost + mock_util_cost) / (mock_rpo_
 
 max_ps_allowed = min(me_total_feed * ps_pct_max, ps_supply_weekly / 7.0)
 
-# เทียบราคาเพื่อกำหนดสัดส่วน
 if mock_rpo_cost_kg <= ps_p:
     rpo_demand = min(me_total_feed, max_pre_cap_val)
     ps_qty = me_total_feed - rpo_demand
@@ -156,7 +163,6 @@ q_cpo_b = pre_total_feed * cpo_b_pct
 q_pfad = pre_total_feed * pfad_ratio
 q_pfad_ex = pre_total_feed * pfad_ex_pct
 
-# --- DataFrames for Pretreatment ---
 df_pre_fs = pd.DataFrame({
     "Feed Type": ["CPO A", "CPO B", "PFAD", "PFAD Extra", "TOTAL"],
     "Ratio (%)": [cpo_a_ratio*100, cpo_b_pct*100, pfad_ratio*100, pfad_ex_pct*100, 100.0],
@@ -166,7 +172,6 @@ df_pre_fs = pd.DataFrame({
 fs_cost_pre = df_pre_fs["Cost (kTHB)"].iloc[:-1].sum() * 1000
 df_pre_fs.loc[4, "Cost (kTHB)"] = fs_cost_pre / 1000
 
-# Using dynamic consumption variables
 df_pre_chem = pd.DataFrame({
     "Chemical Item": ["RGL Chem", "Phosphoric acid (H3PO4)", "Bleaching clay", "TOTAL"],
     "Qty Usage": [
@@ -187,12 +192,12 @@ df_pre_chem.loc[3, "Qty Usage"] = df_pre_chem["Qty Usage"].iloc[:-1].sum()
 chem_cost_pre = df_pre_chem["Cost (kTHB)"].iloc[:-1].sum() * 1000
 df_pre_chem.loc[3, "Cost (kTHB)"] = chem_cost_pre / 1000
 
-pre_util_pct = (rpo_demand / 600) * 100
+pre_util_pct = (rpo_demand / 600) * 100 if rpo_demand > 0 else 0
 df_pre_util = pd.DataFrame({
     "Utility Item": ["Electricity", "Water", "Fuel Oil", "Nitrogen", "Biogas", "TOTAL"],
     "Cost (kTHB)": [
-        (35.118 * (pre_util_pct**-0.892) * elec_p * rpo_demand) / 1000,
-        (0.2814 * (pre_util_pct**-0.673) * water_p * rpo_demand) / 1000,
+        (35.118 * (pre_util_pct**-0.892) * elec_p * rpo_demand) / 1000 if pre_util_pct > 0 else 0,
+        (0.2814 * (pre_util_pct**-0.673) * water_p * rpo_demand) / 1000 if pre_util_pct > 0 else 0,
         (2.7718 * fuel_p) / 1000,
         (0.1667 * pre_total_feed * n2_p) / 1000,
         (31.6348 * pre_total_feed * biogas_p) / 1000,
@@ -202,7 +207,7 @@ df_pre_util = pd.DataFrame({
 util_cost_pre = df_pre_util["Cost (kTHB)"].iloc[:-1].sum() * 1000
 df_pre_util.loc[5, "Cost (kTHB)"] = util_cost_pre / 1000
 
-rpo_cost_kg = (fs_cost_pre + chem_cost_pre + util_cost_pre) / (rpo_demand * 1000)
+rpo_cost_kg = (fs_cost_pre + chem_cost_pre + util_cost_pre) / (rpo_demand * 1000) if rpo_demand > 0 else 0
 
 # --------------------------------------------------------------------------------
 # 3. ME Unit Calculation
@@ -216,7 +221,6 @@ df_me_fs = pd.DataFrame({
 fs_cost_me = df_me_fs["Cost (kTHB)"].iloc[:-1].sum() * 1000
 df_me_fs.loc[2, "Cost (kTHB)"] = fs_cost_me / 1000
 
-# Using dynamic consumption variables for ME
 df_me_chem = pd.DataFrame({
     "Chemical Item": ["MeOH", "Na-Methylate", "NaOH", "HCL", "BHT", "TOTAL"],
     "Qty (kg)": [
@@ -282,7 +286,6 @@ rgl_feed = c_cgl * me_total_feed
 rgl_prod = rgl_feed * c_rgl_yield
 fs_cost_rgl = rgl_feed * cgl_p_in * 1000
 
-# Using dynamic consumption variables for RGL
 df_rgl_chem = pd.DataFrame({
     "Chemical Item": ["NaOH", "Fresh Activated Carbon", "Regen Activated Carbon", "TOTAL"],
     "Qty (kg)": [
@@ -345,8 +348,8 @@ st.markdown('<p class="main-title">🏭 Factory Scenario Analysis Dashboard</p>'
 st.markdown('<div class="unit-header">1. Pretreatment Unit Analysis</div>', unsafe_allow_html=True)
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Utilization", f"{pre_util_pct:.2f}%")
-col2.metric("RPO Feed Stock Cost", f"{fs_cost_pre/rpo_demand/1000:.3f}", help="THB/kg")
-col3.metric("RPO Variable Cost", f"{(chem_cost_pre + util_cost_pre)/(rpo_demand*1000):.3f}", help="THB/kg")
+col2.metric("RPO Feed Stock Cost", f"{fs_cost_pre/rpo_demand/1000:.3f}" if rpo_demand > 0 else "0.000", help="THB/kg")
+col3.metric("RPO Variable Cost", f"{(chem_cost_pre + util_cost_pre)/(rpo_demand*1000):.3f}" if rpo_demand > 0 else "0.000", help="THB/kg")
 col4.metric("RPO Prod Cost", f"{rpo_cost_kg:.3f}", help="THB/kg")
 
 st.markdown('<p class="sub-section">Data Breakdown (Pretreatment)</p>', unsafe_allow_html=True)
@@ -358,28 +361,25 @@ with c2:
     st.markdown("**Chemicals Summary**")
     st.dataframe(df_pre_chem.style.format({"Qty Usage": "{:,.2f}", "Cost (kTHB)": "{:,.1f}"}), use_container_width=True)
 
-# --- EXPANDER รายละเอียดการคำนวณ Pretreatment ---
 with st.expander("🔍 ดูรายละเอียดการคำนวณ (Cost Breakdown - Pretreatment)"):
     col_u, col_c = st.columns(2)
-
     with col_u:
         st.markdown("**Utility Cost Itemized**")
         st.dataframe(df_pre_util.style.format({"Cost (kTHB)": "{:,.2f}"}), use_container_width=True)
     with col_c:
         st.markdown("**RPO Cost Breakdown**")
         df_pre_cost = pd.DataFrame({
-    "Item": ["RPO Production","Feed Stock Cost", "Chemical Cost", "Utility Cost", "TOTAL"],
-    "Qty": [
-        rpo_demand, 
-        fs_cost_pre/rpo_demand/1000, 
-        chem_cost_pre/rpo_demand/1000, 
-        util_cost_pre/rpo_demand/1000, 
-        fs_cost_pre/rpo_demand/1000+chem_cost_pre/rpo_demand/1000+util_cost_pre/rpo_demand/1000, 
-    ],
-    "Unit": ["MT", "THB/Kg", "THB/Kg", "THB/Kg", "THB/Kg"],
-})
+            "Item": ["RPO Production","Feed Stock Cost", "Chemical Cost", "Utility Cost", "TOTAL"],
+            "Qty": [
+                rpo_demand, 
+                fs_cost_pre/rpo_demand/1000 if rpo_demand > 0 else 0, 
+                chem_cost_pre/rpo_demand/1000 if rpo_demand > 0 else 0, 
+                util_cost_pre/rpo_demand/1000 if rpo_demand > 0 else 0, 
+                rpo_cost_kg, 
+            ],
+            "Unit": ["MT", "THB/Kg", "THB/Kg", "THB/Kg", "THB/Kg"],
+        })
         st.dataframe(df_pre_cost.style.format({"Qty": "{:,.3f}"}), use_container_width=True)
-
 
 # --------------------------------------------------------------------------------
 # 2. ME Unit Result
@@ -406,7 +406,6 @@ with c2:
     st.markdown("**By-Products Credit**")
     st.dataframe(df_me_bp.style.format({"Qty (MT)": "{:.2f}", "Credit (kTHB)": "{:,.1f}"}), use_container_width=True)
 
-# --- EXPANDER รายละเอียดการคำนวณ ME ---
 with st.expander("🔍 ดูรายละเอียดการคำนวณ (Cost Breakdown - ME)"):
     col_c, col_u = st.columns(2)
     with col_c:
@@ -420,23 +419,21 @@ with st.expander("🔍 ดูรายละเอียดการคำนว
     with col_me:
         st.markdown("**ME Cost Breakdown**")
         df_ME_cost = pd.DataFrame({
-    "Item": ["ME Production","ME Selling Price","Feed Stock Cost (inclde Methanol)", "P2F","Chemical Cost", "Utility Cost","Other Variable Cost","By-Product Credit", "TOTAL"],
-    "Qty": [
-        me_production,
-        me_p, 
-        me_fs_kg, 
-        me_p2f,
-        (chem_cost_me - (cons_meoh*meoh_p*me_total_feed*1000)) / (me_production * 1000), 
-        util_cost_me / (me_production * 1000),
-        0.39276587,
-        me_bp_kg,
-        me_cm,
-    ],
-    "Unit": ["MT","THB/Kg", "THB/Kg", "THB/Kg","THB/Kg", "THB/Kg", "THB/Kg", "THB/Kg", "THB/Kg"],
-})
+            "Item": ["ME Production","ME Selling Price","Feed Stock Cost (inclde Methanol)", "P2F","Chemical Cost", "Utility Cost","Other Variable Cost","By-Product Credit", "TOTAL"],
+            "Qty": [
+                me_production,
+                me_p, 
+                me_fs_kg, 
+                me_p2f,
+                (chem_cost_me - (cons_meoh*meoh_p*me_total_feed*1000)) / (me_production * 1000), 
+                util_cost_me / (me_production * 1000),
+                0.39276587,
+                me_bp_kg,
+                me_cm,
+            ],
+            "Unit": ["MT","THB/Kg", "THB/Kg", "THB/Kg","THB/Kg", "THB/Kg", "THB/Kg", "THB/Kg", "THB/Kg"],
+        })
         st.dataframe(df_ME_cost.style.format({"Qty": "{:,.3f}"}), use_container_width=True)
-
-
 
 # --------------------------------------------------------------------------------
 # 3. RGL Unit Result
@@ -458,44 +455,41 @@ with c2:
     st.markdown("**By-Products Credit**")
     st.dataframe(df_rgl_bp.style.format({"Qty (MT)": "{:.2f}", "Credit (kTHB)": "{:,.1f}"}), use_container_width=True)
 
-# --- EXPANDER รายละเอียดการคำนวณ RGL ---
 with st.expander("🔍 ดูรายละเอียดการคำนวณ (Cost Breakdown - RGL)"):
     col_u, col_co = st.columns(2)
-
     with col_u:
         st.markdown("**Utility Cost Itemized**")
         st.dataframe(df_rgl_util.style.format({"Cost (kTHB)": "{:,.2f}"}), use_container_width=True)
     with col_co:
         st.markdown("**RGL Cost Breakdown**")
-        df_pre_cost = pd.DataFrame({
-    "Item": ["RGL Selling Price","FeedStock Cost","P2F", "Chemical Cost", "Utility Cost", "Disposal Cost", "By-Product Credit", "CM RGL"],
-    "Qty (THB/Kg)": [
-        rgl_p, 
-        rgl_fs_kg, 
-        rgl_p2f, 
-        (chem_cost_rgl) / (rgl_prod * 1000),
-        util_cost_rgl / (rgl_prod * 1000),
-        (disposal_cost_rgl * 1000) / (rgl_prod * 1000),
-        rgl_bp_kg,
-        rgl_cm, 
-    ],
-    "Qty (USD/MT)": [
-        rgl_p*fx, 
-        rgl_fs_kg*fx, 
-        rgl_p2f*fx, 
-        (chem_cost_rgl) / (rgl_prod * 1000)*fx,
-        util_cost_rgl / (rgl_prod * 1000)*fx,
-        (disposal_cost_rgl * 1000) / (rgl_prod * 1000)*fx,
-        rgl_bp_kg*fx,
-        rgl_cm*fx, 
-        ],
-})
-        st.dataframe(df_pre_cost.style.format({"Qty (THB/Kg)": "{:,.3f}", "Qty (USD/MT)": "{:,.1f}"}), use_container_width=True)
-
+        df_rgl_cost_breakdown = pd.DataFrame({
+            "Item": ["RGL Selling Price","FeedStock Cost","P2F", "Chemical Cost", "Utility Cost", "Disposal Cost", "By-Product Credit", "CM RGL"],
+            "Qty (THB/Kg)": [
+                rgl_p, 
+                rgl_fs_kg, 
+                rgl_p2f, 
+                (chem_cost_rgl) / (rgl_prod * 1000),
+                util_cost_rgl / (rgl_prod * 1000),
+                (disposal_cost_rgl * 1000) / (rgl_prod * 1000),
+                rgl_bp_kg,
+                rgl_cm, 
+            ],
+            "Qty (USD/MT)": [
+                rgl_p*1000/fx, 
+                rgl_fs_kg*1000/fx, 
+                rgl_p2f*1000/fx, 
+                (chem_cost_rgl) / (rgl_prod * 1000)*1000/fx,
+                util_cost_rgl / (rgl_prod * 1000)*1000/fx,
+                (disposal_cost_rgl * 1000) / (rgl_prod * 1000)*1000/fx,
+                rgl_bp_kg*1000/fx,
+                rgl_cm*1000/fx, 
+            ],
+        })
+        st.dataframe(df_rgl_cost_breakdown.style.format({"Qty (THB/Kg)": "{:,.3f}", "Qty (USD/MT)": "{:,.1f}"}), use_container_width=True)
 
 # --------------------------------------------------------------------------------
 # 4. Total Summary
 # --------------------------------------------------------------------------------
 st.markdown('<div class="unit-header" style="background-color:#16a085;">4. Overall Performance</div>', unsafe_allow_html=True)
-total_cm_val = me_cm + rgl_cm*rgl_prod/me_production
+total_cm_val = me_cm + (rgl_cm * rgl_prod / me_production)
 st.subheader(f"Total Contribution Margin: {total_cm_val:,.3f} THB/Kg", help="ME + RGL")
